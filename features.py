@@ -16,7 +16,7 @@ GROUPS = {
             "reg_change", "rules_age", "season_races", "car_reg_adapt"],
     "Driver": ["driver_form", "teammate_delta", "driver_dnf_rate", "starts"],
     "Track & conditions": ["track_delta", "track_visits", "wet", "wet_delta"],
-    "Qualifying": ["grid"],
+    "This weekend": ["practice", "grid"],
 }
 FEATURES = [f for fs in GROUPS.values() for f in fs]
 LABELS = {
@@ -37,6 +37,7 @@ LABELS = {
     "track_visits": "Driver visits to this circuit",
     "wet": "Wet race",
     "wet_delta": "Driver wet-weather record",
+    "practice": "Practice pace this weekend",
     "grid": "Grid position",
 }
 NAN = math.nan
@@ -132,13 +133,15 @@ def build(rows):
         for r in rs:
             out.append(dict(season=season, round=rnd, race_name=r["race"], driver=r["driver"], name=r["name"], team=r["team"],
                             **history.features(r["driver"], r["team"], season, r["circuit"], r["wet"]),
+                            practice=r.get("practice", NAN), number=r.get("number"),
                             grid=r["grid"] or len(rs), pos=r["pos"], finished=r["finished"]))  # grid 0 = pit-lane start
         history.add(rs)
     return pd.DataFrame(out), history
 
 
 def upcoming(history, entries, season, circuit, wet):
-    """Feature frame for a race that hasn't run; entries: [{driver, name, team, grid?}]."""
+    """Feature frame for a race that hasn't run; entries: [{driver, name, team, practice?, grid?}]."""
     return pd.DataFrame([dict(driver=e["driver"], name=e["name"], team=e["team"],
-                              **history.features(e["driver"], e["team"], season, circuit, wet), grid=e.get("grid", NAN))
+                              **history.features(e["driver"], e["team"], season, circuit, wet),
+                              practice=e.get("practice", NAN), grid=e.get("grid", NAN))
                          for e in entries])

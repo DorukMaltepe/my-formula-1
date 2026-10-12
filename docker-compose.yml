@@ -1,0 +1,21 @@
+services:
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:8501:8501"  # only this computer can open the app, not other devices on the network
+    volumes:
+      - f1-cache:/app/.cache  # downloaded seasons survive restarts and rebuilds
+    # hardening: the only writable places are the cache volume and /tmp, no Linux privileges, capped resources
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    pids_limit: 256
+    restart: unless-stopped
+
+volumes:
+  f1-cache:

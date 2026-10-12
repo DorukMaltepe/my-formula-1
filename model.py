@@ -16,7 +16,7 @@ CONFIG = dict(objective="lambdarank", metric="ndcg", learning_rate=0.05, num_lea
 TUNED = Path(__file__).with_name("tuned_params.json")
 if TUNED.exists():
     CONFIG |= json.loads(TUNED.read_text())
-MONOTONE = {"car_level": -1, "driver_form": -1, "grid": -1}  # a worse past position can only lower the score
+MONOTONE = {"car_level": -1, "driver_form": -1, "practice": -1, "grid": -1}  # a worse past position can only lower the score
 METHODS = ["Model + grid", "Model, before qualifying", "Grid order only"]
 
 

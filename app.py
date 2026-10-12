@@ -52,7 +52,7 @@ with st.sidebar:
 
 df, history = dataset(today)
 models = trained(today)
-race, entries, forecast = next_race(today)
+race, entries, forecast, (fp_sessions, fp_gaps) = next_race(today)
 st.sidebar.caption(f"Trained on {df[['season', 'round']].drop_duplicates().shape[0]} races "
                    f"({df['season'].min()}–{df['season'].max()}). Data: Jolpica F1, Open-Meteo.")
 
@@ -69,22 +69,28 @@ with tab_next:
             wet, conditions = rain == "Wet", f"{rain} (set manually)"
         if not entries:  # before qualifying, assume the last race's line-up
             last = df[(df["season"] == df["season"].max())]
-            entries = last[last["round"] == last["round"].max()][["driver", "name", "team"]].to_dict("records")
+            entries = last[last["round"] == last["round"].max()][["driver", "name", "team", "number"]].to_dict("records")
+        for e in entries:
+            e["practice"] = fp_gaps.get(e["number"], features.NAN)
         with_grid = all("grid" in e for e in entries)
+        stage = ", ".join([f"{fp_sessions} practice session{'s' * (fp_sessions != 1)} used" if fp_sessions else "no practice run yet",
+                           "qualifying done, using grid positions" if with_grid else "qualifying not run yet"])
         X = features.upcoming(history, entries, int(race["season"]), race["Circuit"]["circuitId"], wet)
         ranked = model.rank(models[with_grid], X)
 
         st.header(f"{race['season']} {race['raceName']}")
-        st.caption(f"{race['Circuit']['circuitName']} · {race['date']} · {conditions} · "
-                   + ("qualifying done, using grid positions" if with_grid else "qualifying not run yet"))
+        st.caption(f"{race['Circuit']['circuitName']} · {race['date']} · {conditions} · {stage}. "
+                   "Predicted from earlier races and this weekend's sessions only; refresh data after each session.")
         for col, (label, name) in zip(st.columns(3), zip(["Predicted winner", "Predicted P2", "Predicted P3"], ranked["name"])):
             col.metric(label, name)
 
         left, right = st.columns([5, 6])
-        table = ranked[["predicted", "name", "team", "grid", "car_level", "car_trend", "teammate_delta", "track_delta"]]
+        table = ranked[["predicted", "name", "team", "grid", "practice", "car_level", "car_trend", "teammate_delta", "track_delta"]]
         left.dataframe(table if with_grid else table.drop(columns="grid"), hide_index=True, height=35 * len(table) + 38,
                        column_config={
                            "predicted": "P", "name": "Driver", "team": "Team", "grid": "Grid",
+                           "practice": st.column_config.NumberColumn("Practice gap", format="+%.2f%%",
+                                                                     help="Best lap vs the fastest lap of the same practice session, best across sessions"),
                            "car_level": st.column_config.NumberColumn("Car pace", format="%.1f", help=features.LABELS["car_level"]),
                            "car_trend": st.column_config.NumberColumn("Car trend", format="%+.2f",
                                                                       help="Places gained (−) or lost (+) per race over the last 6 races"),
@@ -94,8 +100,7 @@ with tab_next:
                                                                         help="Past results here vs that season's average (− = better here)"),
                        })
 
-        groups = [g for g in features.GROUPS if with_grid or g != "Qualifying"]
-        long = ranked.melt(id_vars=["name", "predicted"], value_vars=groups, var_name="Factor", value_name="Effect")
+        long = ranked.melt(id_vars=["name", "predicted"], value_vars=list(features.GROUPS), var_name="Factor", value_name="Effect")
         bars = alt.Chart(long).mark_bar(size=12).encode(
             x=alt.X("Effect:Q", title="← pushes down the order · pushes up the order →"),
             y=alt.Y("name:N", sort=alt.EncodingSortField("predicted", op="min"), title=None),

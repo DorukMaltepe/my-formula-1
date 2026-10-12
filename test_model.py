@@ -1,4 +1,5 @@
 """Offline checks on synthetic races. Run: python test_model.py"""
+import data
 import features
 import model
 
@@ -27,6 +28,22 @@ def test_learns_car_and_driver_order():
     ranked = model.rank(model.train(df, False), features.upcoming(history, entries, 2026, "x", False))
     order = ranked["driver"].tolist()
     assert order[0] == "a1" and order[-1] == "c2", order
+
+
+def test_practice_gaps():
+    sessions = [dict(session_key=1, session_name="Day 1", meeting_key=9, date_start="2026-02-20T09:00"),  # testing: ignored
+                dict(session_key=2, session_name="Practice 1", meeting_key=10, date_start="2026-03-06T01:30"),
+                dict(session_key=3, session_name="Practice 2", meeting_key=10, date_start="2026-03-06T05:00"),
+                dict(session_key=4, session_name="Race", meeting_key=10, date_start="2026-03-08T04:00")]
+    results = [dict(session_key=2, driver_number=1, duration=100.0), dict(session_key=2, driver_number=44, duration=101.0),
+               dict(session_key=3, driver_number=1, duration=90.0), dict(session_key=3, driver_number=44, duration=90.45),
+               dict(session_key=3, driver_number=16, duration=None), dict(session_key=1, driver_number=16, duration=50.0)]
+    real_get, data.get = data.get, lambda url, cache: sessions if "/sessions" in url else results
+    try:
+        n, gaps = data.practice(2026, False)["2026-03-08"]
+    finally:
+        data.get = real_get
+    assert n == 2 and gaps[1] == 0 and abs(gaps[44] - 0.5) < 1e-9 and 16 not in gaps, (n, gaps)
 
 
 if __name__ == "__main__":
