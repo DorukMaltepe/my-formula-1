@@ -1,42 +1,41 @@
 # my-formula-1
 
-A command-line tool that predicts the finishing order of the next Formula 1 race. It needs only Python 3.12+ and no third-party packages.
-
-```
-$ python f1predict.py
-2026 United States Grand Prix (2026-10-25) - dry (forecast), qualifying not run yet
-
- P  driver                team           score   car   drv track  rain
- 1  Max Verstappen        red_bull         1.6   4.0  -2.1  -0.2  +0.0
- 2  Charles Leclerc       ferrari          3.0   3.9  -0.4  -0.5  +0.0
- 3  Lewis Hamilton        ferrari          3.9   3.9  +0.4  -0.4  +0.0
- ...
-```
+A machine-learning web app that predicts the finishing order of the next Formula 1 race. A LightGBM ranking model learns from eight seasons of results how car pace, driver form, track history and weather turn into a race result. A Streamlit app shows the prediction, the reasons behind it, and how accurate the model has been.
 
 ## Why this repo exists
 
-A race result comes mainly from three things: **the car**, **the driver** and **the track**. Most quick predictions use only one of them, such as the championship standings or last week's winner. This project combines all three in one transparent score:
+A race result comes mainly from three things: **the car**, **the driver** and **the track**. Each one is easy to describe but hard to weigh by hand:
 
-- **Car performance** changes during a season as teams bring upgrades. A team that has improved over the last five races should be rated higher than its season average suggests.
-- **Driver performance** is hard to see on its own because a fast car flatters its drivers. The fairest measure is how a driver does against their teammate in the same car.
-- **Track performance** depends on the circuit and the conditions. Some drivers keep doing well at certain circuits or in the rain, so a driver's past results at this circuit and in similar weather should count.
+- **Car performance** changes during a season as teams bring upgrades. A team that is climbing should be rated above its season average.
+- **Driver performance** is hidden by the car. The fairest measure is how a driver does against their teammate in the same machine.
+- **Track performance** depends on the circuit and the conditions. Some drivers keep shining at certain circuits or in the rain.
 
-The goal is a model you can **read, question and tune**, not a black box. Every prediction shows how much each factor contributed. A built-in backtest shows how well the model would have predicted races that have already run.
+How much does a good wet-weather record matter compared with a two-place gap to a teammate? Rather than guess weights, this project **learns them from history**. It also keeps the model explainable: every prediction shows which factors pushed each driver up or down, and a walk-forward backtest shows how the model would have done on races that have already run.
 
 ## Quick start
 
 ```
-python f1predict.py              # predict the next race
-python f1predict.py --rain wet   # force wet or dry conditions (default: use the forecast)
-python f1predict.py --backtest   # score the model on this season's past races
-python test_f1predict.py         # offline checks on synthetic data
+pip install -r requirements.txt
+streamlit run app.py
 ```
 
-The first run downloads about four seasons of results and weather, which takes a minute or two. After that, completed seasons load from `.cache/`.
+The first launch downloads about eight seasons of results and race-day weather, which takes a few minutes. After that, completed seasons load from `.cache/` in seconds. Use **Refresh data** in the sidebar to pull the latest results, for example after qualifying.
+
+```
+python test_model.py   # offline checks: no data leakage, and the model learns a known order
+```
+
+## The app
+
+| Tab | What it shows |
+|---|---|
+| **Next race** | Predicted finishing order, the top 3 as headline cards, key inputs per driver (car pace, car trend, gap to teammate, track record), and a chart of how much each factor group pushed each driver up or down. Before qualifying it uses the pre-qualifying model; once the grid is published, it switches to the model that also uses grid positions. |
+| **Model accuracy** | How each prediction method did this season (rank correlation, winner correct, podium drivers correct), accuracy per race, and which features the model relies on. |
+| **Race explorer** | Pick any past race this season to compare the predictions with the actual result. |
+
+The sidebar lets you override the weather (forecast / dry / wet) to see how the prediction changes in the rain.
 
 ## Architecture
-
-The whole tool is one script, [f1predict.py](f1predict.py), with three stages: **fetch → normalise → predict**.
 
 ```mermaid
 flowchart LR
@@ -44,106 +43,100 @@ flowchart LR
         J[Jolpica F1 API<br/>results, schedule, qualifying]
         W[Open-Meteo<br/>hourly rain archive and forecast]
     end
-
-    J --> G[get<br/>HTTP, retry, disk cache]
+    subgraph data.py
+        G[get<br/>HTTP, retry, disk cache] --> R[flat result rows<br/>one per driver per race]
+    end
+    subgraph features.py
+        H[History<br/>replays races in order] --> F[feature rows<br/>built only from earlier races]
+    end
+    subgraph model.py
+        T[train<br/>LightGBM lambdarank] --> P[rank<br/>order + SHAP contributions]
+        B[backtest<br/>walk-forward, race by race]
+    end
+    J --> G
     W --> G
-    G --> SR[season_races<br/>merge paginated results]
-    G --> RN[rained<br/>rain in the race window?]
-    SR --> TR[to_rows<br/>one flat row per driver per race]
-    RN --> TR
-    TR --> H[(history rows)]
-
-    H --> P[predict]
-    N[next race + field<br/>+ grid if qualifying ran] --> P
-    P --> O[ranked table<br/>with per-factor breakdown]
-    H --> B[backtest<br/>replay each past race]
-    B --> P
+    R --> H
+    F --> T
+    F --> B
+    P --> A[app.py<br/>Streamlit UI]
+    B --> A
 ```
 
-| Function | Responsibility |
+| File | Responsibility |
 |---|---|
-| `get` | Sends an HTTP GET request and retries on rate limits and dropped connections. Responses that won't change (finished seasons, historical weather) are cached to disk. |
-| `season_races` | Downloads a season's results from Jolpica, page by page, and joins any race that is split across pages. |
-| `rained` | Sums the rain during the three hours from the race start. Races more than 60 days ago use the Open-Meteo archive; recent and upcoming races use the forecast endpoint. |
-| `to_rows` | Turns the API data into flat rows: season, round, circuit, wet, driver, team, grid, position, finished. |
-| `predict` | Takes history rows, the entry list, the circuit, the conditions and an optional grid, and returns the finishing order with a breakdown for each driver. It does no input/output, so the tests and the backtest can call it directly. |
-| `backtest` | For each race this season, predicts the result using only the races before it and compares that with what actually happened. |
-| `main` | Handles the command-line options, finds the next race and the field (the last race's entrants, or the qualifying entry list once it exists), and prints the table. |
+| [data.py](data.py) | Downloads race results and qualifying from Jolpica, and rain during each race from Open-Meteo. Retries on rate limits and dropped connections, and caches responses that won't change. |
+| [features.py](features.py) | Replays every race in date order. Before each race it computes that race's features from earlier races only, then adds the race's result to the history. This makes data leakage impossible by construction. |
+| [model.py](model.py) | Trains the ranking model, ranks a field with per-feature SHAP contributions, reports feature importance, and runs the walk-forward backtest. |
+| [app.py](app.py) | The Streamlit interface. Caches the downloads, the trained models and the backtest. |
+| [test_model.py](test_model.py) | Synthetic-data checks: changing a race's result never changes its own features, and the model learns an obvious car and driver order. |
 
-## Model design
+## Features
 
-Every factor is measured in **finishing positions**, so the factors can be added together, and the final score reads as an expected finishing position. A lower score is better.
+Each driver in each race is described by 13 features in the three categories, plus qualifying:
 
-```
-score = car + driver + track + rain
-score = 0.5 × score + 0.5 × grid          (only once qualifying has run)
-```
+| Group | Feature | Meaning |
+|---|---|---|
+| **Car** | `car_level` | Team's average finishing position, weighted toward the last few races (half-life 3 races). Uses only the current season once it has 3 races, because new regulations reset the pecking order. |
+| | `car_trend` | Slope of the team's results over the last 6 races, which captures upgrade momentum (negative = improving) |
+| | `car_dnf_rate` | Team's share of cars that didn't finish over the last 10 races (reliability) |
+| | `car_track` | Team's past results at this circuit compared with its season average (how well the car suits the track) |
+| **Driver** | `driver_form` | Driver's recent finishing positions (half-life 5 races) |
+| | `teammate_delta` | Places ahead of or behind the teammate (half-life 8 races), which separates driver skill from the car |
+| | `driver_dnf_rate` | Driver's share of races not finished over their last 10 |
+| | `starts` | Experience: races in the dataset |
+| **Track & conditions** | `track_delta` | Driver's past results at this circuit compared with their season average. Past races in the same conditions count double. |
+| | `track_visits` | How many times the driver has raced here |
+| | `wet` | Whether the race is expected to be wet (more than 0.5 mm of rain in the first 3 hours) |
+| | `wet_delta` | Driver's results in wet races compared with their season average |
+| **Qualifying** | `grid` | Starting position (used only by the after-qualifying model) |
 
-### Car: current level plus development trend
-1. For each race, take the team's average finishing position across its cars.
-2. **Level:** an exponentially weighted average of those values with a half-life of 3 races, so recent races matter most.
-3. **Trend:** the slope of a straight line fitted to the team's last 6 races. This projects upgrade momentum forward by one race. A team gaining one place per race moves up one place.
-4. Once the current season has 3 races, only this season is used. This matters for new rules, such as the 2026 regulations, which reset the pecking order.
+Missing values (rookies, first visits to a track) are left empty. LightGBM handles them natively rather than having them filled with guesses.
 
-### Driver: teammate comparison
-The driver's finishing position minus their team's average in each race, weighted with a half-life of 8 races. Comparing teammates cancels out the car. Because it uses whichever car the driver was in at the time, a driver's rating carries over when they change teams.
+## Model
 
-### Track: circuit history in matching conditions
-The driver's results at this circuit compared with their own average for that season. This shows whether they usually do better or worse here than they normally do. Past visits in the same conditions (wet or dry) count fully, and visits in the other conditions count half. The result is multiplied by 0.5 because track history is a noisy signal.
+- **Learning to rank, not regression.** The model uses LightGBM's `lambdarank` objective with each race as a query group. It learns to *order* the drivers within a race, which is the actual question, rather than predicting a finishing position for each driver independently. Higher places get more weight, so mistakes at the front cost more than mistakes in the midfield.
+- **Two models.** One is trained without `grid` for predictions before qualifying, the other with `grid` for after qualifying. The app picks the right one automatically.
+- **Trained on finishers.** Retirements are mostly bad luck, so the model learns the order of drivers who finished. Reliability still enters through the retirement-rate features.
+- **Monotone constraints.** A worse car pace, driver form or grid slot can never improve a driver's predicted position. This keeps the model sensible on a small dataset.
+- **Small on purpose.** Each tree has 7 leaves, with at least 40 rows per leaf and 100 boosting rounds. The dataset has about 3,400 rows, and larger settings did worse in the backtest.
+- **Explainable.** The app calculates each prediction's SHAP contributions with LightGBM's built-in `pred_contrib`, then sums them into the Car / Driver / Track & conditions / Qualifying groups.
 
-### Rain: wet-weather skill
-The driver's results in wet races compared with their season average. This is applied only when the race is expected to be wet. A race counts as wet if more than 0.5 mm of rain falls in the three hours from the start.
+## Evaluation
 
-### Shared design choices
-- **Races a driver didn't finish are ignored.** A failure or a crash says little about pace, and ignoring them keeps reliability noise out of the pace estimates.
-- **Small samples are pulled toward zero.** The driver, track and rain factors include 3 imaginary races at zero, so one lucky result at a circuit can't dominate. Rookies start at 0 and move toward their real level as races come in.
-- **Additive and explainable.** Each factor is shown in the output, so you can see why a driver is ranked where they are.
-- **Pure prediction function.** `predict` takes data and returns a ranking. The backtest replays history through the same code the live prediction uses, so it can't drift from it.
+The model is evaluated with a **walk-forward backtest**: for each race of the current season, a model is trained only on the races before it and then predicts that race. The scores measure the order of drivers who finished.
 
-## How well it works
+2026 season, rounds 4–17 (14 races):
 
-Results of `--backtest` on the 2026 season (rounds 4–17). Each race was predicted using only the races before it. The score is the Spearman rank correlation between the predicted and actual order of drivers who finished, where 1.0 is a perfect prediction.
+| Prediction | Rank correlation | Winner correct | Podium drivers correct (of 3) |
+|---|---|---|---|
+| Model + grid | **0.84** | 71% | **2.21** |
+| Model, before qualifying | 0.81 | 29% | 2.00 |
+| Grid order only (baseline) | 0.80 | 71% | 2.14 |
 
-| Prediction | Mean |
-|---|---|
-| Model, before qualifying | 0.81 |
-| Grid order only (baseline) | 0.80 |
-| Model blended with grid | 0.84 |
-
-Before qualifying, the model is about as accurate as knowing the grid. Once the grid is known, combining the two beats either one alone.
+Before qualifying, the model ranks the field about as well as knowing the grid does. Once the grid is known, the model beats grid order on overall order and podium, and ties it on the winner. Fourteen races is a small sample, so treat differences of a few hundredths as noise.
 
 ## Configuration
 
-All the settings are constants at the top of [f1predict.py](f1predict.py). After changing one, run `--backtest` to check that it helps.
-
-| Constant | Default | Effect |
+| Setting | Where | Default |
 |---|---|---|
-| `SEASONS` | 4 | Seasons of history to load |
-| `CAR_HALF_LIFE` | 3 | How quickly old car results fade |
-| `DRIVER_HALF_LIFE` | 8 | How quickly old driver results fade |
-| `TREND_WINDOW` / `TREND_WEIGHT` | 6 / 1.0 | Races used to measure upgrade momentum, and how far it is projected forward |
-| `TRACK_WEIGHT` | 0.5 | Weight of circuit history |
-| `GRID_WEIGHT` | 0.5 | Weight of grid position once qualifying has run |
-| `SHRINK` | 3 | Imaginary races at zero that keep small samples from dominating |
-| `WET_MM` | 0.5 | Millimetres of rain during the race that make it wet |
+| Seasons of history | `SEASONS` in [app.py](app.py) | 8 |
+| Model settings | `PARAMS`, `ROUNDS`, `MONOTONE` in [model.py](model.py) | see above |
+| Wet-race threshold | `WET_MM` in [data.py](data.py) | 0.5 mm |
+| Feature definitions | `History.features` in [features.py](features.py) | – |
+
+After changing anything, check the **Model accuracy** tab to see whether the change helps.
 
 ## Data sources
 
-- [Jolpica F1](https://github.com/jolpica/jolpica-f1), the community successor to the Ergast API: results, schedule and qualifying. No API key is needed. It allows about 4 requests per second, which the tool respects.
+- [Jolpica F1](https://github.com/jolpica/jolpica-f1), the community successor to the Ergast API: results, schedule and qualifying. No API key is needed. It allows about 4 requests per second, which the app respects.
 - [Open-Meteo](https://open-meteo.com): hourly rain from the historical archive and the 16-day forecast. No API key is needed.
 
-Responses that won't change are cached in `.cache/` (ignored by git). Delete the folder to download everything again.
-
-## Project layout
-
-```
-f1predict.py        all fetching, modelling and output
-test_f1predict.py   synthetic-data checks: faster car, teammate gap, upgrade trend, track/rain specialist
-```
+Responses that won't change (finished seasons, older weather) are cached in `.cache/`, which git ignores.
 
 ## Limitations and ideas
 
-- **Not modelled yet:** win and podium probabilities (Monte Carlo over the score spread), car reliability (how often a team fails to finish), how well each team's car suits a type of circuit, sprint races, practice long-run pace and grid penalties.
-- The weights are reasonable first guesses and haven't been tuned. A small grid search scored by `--backtest` would be the next step.
-- Wet races are rare, so the rain factor is based on few races and is heavily pulled toward zero.
-- Races more than 15 days away have no forecast, so they are treated as dry unless you pass `--rain wet`.
+- **Not modelled yet:** win and podium probabilities (e.g. by simulating many races from the model's scores), sprint races, practice long-run pace, grid penalties, tyre strategy and safety-car likelihood.
+- When a team is renamed (for example `alphatauri` → `rb`), the new name starts with no history, so its car features are thin for the first few races.
+- Wet races are rare, so the model has little to learn from about rain.
+- Races more than 16 days away have no forecast and are treated as dry unless you switch to **Wet** in the sidebar.
+- Before qualifying, the field is assumed to be the line-up from the last race.
