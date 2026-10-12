@@ -5,16 +5,28 @@ from collections import defaultdict
 
 import pandas as pd
 
+REG_CHANGES = {2009, 2014, 2017, 2022, 2026}  # seasons that reset the technical regulations
+ADAPT_RACES = 8  # races either side of a reset used to measure how well a team adapted
+# constructorIds change with rebrands; a lineage keeps one team's car history together
+LINEAGE = {"racing_point": "force_india", "aston_martin": "force_india", "alphatauri": "toro_rosso", "rb": "toro_rosso",
+           "alfa": "sauber", "audi": "sauber", "renault": "lotus_f1", "alpine": "lotus_f1", "manor": "marussia"}
+
 GROUPS = {
-    "Car": ["car_level", "car_trend", "car_dnf_rate", "car_track"],
+    "Car": ["car_level", "car_trend", "car_prev_season", "car_dnf_rate", "car_track",
+            "reg_change", "rules_age", "season_races", "car_reg_adapt"],
     "Driver": ["driver_form", "teammate_delta", "driver_dnf_rate", "starts"],
     "Track & conditions": ["track_delta", "track_visits", "wet", "wet_delta"],
     "Qualifying": ["grid"],
 }
 FEATURES = [f for fs in GROUPS.values() for f in fs]
 LABELS = {
-    "car_level": "Car pace (recent team avg finish)",
-    "car_trend": "Car development trend",
+    "car_level": "Car pace this season",
+    "car_trend": "Car development trend this season",
+    "car_prev_season": "Car pace at end of last season",
+    "reg_change": "Regulation reset season",
+    "rules_age": "Races run under current rules",
+    "season_races": "Races run this season",
+    "car_reg_adapt": "Team's record at past rule resets",
     "car_dnf_rate": "Car retirement rate",
     "car_track": "Car fit for this circuit",
     "driver_form": "Driver recent finishes",
@@ -46,14 +58,18 @@ class History:
     """Everything known before the next race."""
 
     def __init__(self):
-        self.team = defaultdict(list)    # team -> one dict per race
+        self.team = defaultdict(list)    # team lineage -> one dict per race
         self.driver = defaultdict(list)  # driver -> one dict per race
+        self.races = defaultdict(int)    # season -> races run
+        self.adapt = defaultdict(list)   # team lineage -> places gained (-) or lost (+) at each past rule reset
 
     def features(self, driver, team, season, circuit, wet):
-        tr = self.team[team]
-        this_season = [x for x in tr if x["season"] == season]
-        # a new season resets the pecking order, so use only it once the team has 3 races
-        car = [x["mean"] for x in (this_season if len(this_season) >= 3 else tr[-10:]) if x["mean"] is not None]
+        lineage = LINEAGE.get(team, team)
+        tr = self.team[lineage]
+        # current and previous season kept apart so the model learns how much form carries over (little after a reset)
+        car = [x["mean"] for x in tr if x["season"] == season and x["mean"] is not None]
+        prev = [x["mean"] for x in tr if x["season"] == season - 1 and x["mean"] is not None]
+        era = max(y for y in REG_CHANGES if y <= season)
         team_avg = {s: mean([x["mean"] for x in tr if x["season"] == s and x["mean"] is not None]) for s in {x["season"] for x in tr}}
         recent_team = tr[-10:]
 
@@ -66,6 +82,12 @@ class History:
         return {
             "car_level": ewma(car, 3),
             "car_trend": statistics.linear_regression(range(len(recent_car)), recent_car).slope if len(recent_car) >= 3 else NAN,
+            "car_prev_season": mean(prev[-10:]),
+            "reg_change": int(season in REG_CHANGES),
+            # shortcut: undercounts for the first loaded season's era (history starts mid-era), fine for training rows only
+            "rules_age": sum(n for s, n in self.races.items() if s >= era),
+            "season_races": self.races[season],
+            "car_reg_adapt": mean(self.adapt[lineage]),
             "car_dnf_rate": sum(x["dnf"] for x in recent_team) / sum(x["cars"] for x in recent_team) if recent_team else NAN,
             "car_track": mean([x["mean"] - team_avg[x["season"]] for x in tr if x["circuit"] == circuit and x["mean"] is not None]),
             "driver_form": ewma([x["pos"] for x in fin], 5),
@@ -82,14 +104,22 @@ class History:
         teams = defaultdict(list)
         for r in race_rows:
             teams[r["team"]].append(r)
+        season = race_rows[0]["season"]
+        self.races[season] += 1
         for team, rs in teams.items():
             fin = [r["pos"] for r in rs if r["finished"]]  # retirements say little about pace
             team_mean = statistics.fmean(fin) if fin else None
-            self.team[team].append(dict(season=rs[0]["season"], circuit=rs[0]["circuit"], mean=team_mean,
+            self.team[LINEAGE.get(team, team)].append(dict(season=rs[0]["season"], circuit=rs[0]["circuit"], mean=team_mean,
                                         dnf=len(rs) - len(fin), cars=len(rs)))
             for r in rs:
                 self.driver[r["driver"]].append(dict(season=r["season"], circuit=r["circuit"], wet=r["wet"], pos=r["pos"],
                                                      finished=r["finished"], tm_delta=r["pos"] - team_mean if r["finished"] else None))
+        if season in REG_CHANGES and self.races[season] == ADAPT_RACES:  # first stretch of a new era is complete
+            for lineage, tr in self.team.items():
+                before = [x["mean"] for x in tr if x["season"] == season - 1 and x["mean"] is not None][-ADAPT_RACES:]
+                after = [x["mean"] for x in tr if x["season"] == season and x["mean"] is not None]
+                if before and after:
+                    self.adapt[lineage].append(statistics.fmean(after) - statistics.fmean(before))
 
 
 def build(rows):

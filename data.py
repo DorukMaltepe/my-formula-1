@@ -9,6 +9,7 @@ from pathlib import Path
 
 API = "https://api.jolpi.ca/ergast/f1"
 CACHE = Path(__file__).with_name(".cache")
+FIRST_SEASON = 2013  # covers the 2014, 2017, 2022 and 2026 regulation resets
 WET_MM = 0.5  # rain in the first three hours of the race that makes it a wet race
 
 
@@ -64,9 +65,9 @@ def to_rows(race, wet):
             for r in race["Results"]]
 
 
-def load_history(today, seasons):
+def load_history(today, first=FIRST_SEASON):
     rows = []
-    for season in range(today.year - seasons + 1, today.year + 1):
+    for season in range(first, today.year + 1):
         for race in season_races(season, cache=season != today.year):
             rows += to_rows(race, rained(race, today))
     return rows

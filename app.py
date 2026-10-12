@@ -9,20 +9,17 @@ import data
 import features
 import model
 
-SEASONS = 8  # seasons of history to train on, including the current one
-
 st.set_page_config(page_title="F1 Race Predictor", page_icon="🏁", layout="wide")
 # categorical palette in fixed order, stepped for the active theme
 PALETTE = (["#3987e5", "#d95926", "#199e70", "#c98500"] if st.context.theme.type == "dark"
            else ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"])
 GROUP_COLORS = alt.Scale(domain=list(features.GROUPS), range=PALETTE)
-METHODS = ["Model + grid", "Model, before qualifying", "Grid order only"]
-METHOD_COLORS = alt.Scale(domain=METHODS, range=PALETTE[:3])
+METHOD_COLORS = alt.Scale(domain=model.METHODS, range=PALETTE[:3])
 
 
 @st.cache_data(ttl=3600, show_spinner="Downloading results and weather (the first run takes a few minutes)…")
 def dataset(today):
-    df, history = features.build(data.load_history(today, SEASONS))
+    df, history = features.build(data.load_history(today))
     return df, history
 
 
@@ -32,10 +29,10 @@ def trained(today):
     return {with_grid: model.train(df, with_grid) for with_grid in (False, True)}
 
 
-@st.cache_data(show_spinner="Replaying this season race by race…")
+@st.cache_data(show_spinner="Replaying the held-out seasons race by race (about a minute)…")
 def evaluation(today):
     df, _ = dataset(today)
-    return model.backtest(df, df["season"].max())
+    return model.backtest(df, range(model.TEST_FROM, int(df["season"].max()) + 1))
 
 
 @st.cache_data(ttl=600, show_spinner="Checking the next race…")
@@ -110,27 +107,30 @@ with tab_next:
 
 with tab_accuracy:
     scores, preds = evaluation(today)
-    season = df["season"].max()
-    st.header(f"How well it predicted {season}")
-    st.caption(f"Each race from round 4 onward was predicted by a model trained only on the races before it, "
-               f"then compared with the drivers who finished.")
-    summary = scores.groupby("method")[["spearman", "winner", "podium"]].mean().reindex(METHODS)
-    st.dataframe(summary.reset_index(), hide_index=True, column_config={
+    st.header(f"How well it predicted {model.TEST_FROM}–{df['season'].max()}")
+    st.caption(f"Held-out seasons: model settings were tuned on {model.TUNE_SEASONS.start}–{model.TUNE_SEASONS.stop - 1} only "
+               f"(python tune.py). Each race was predicted by a model trained only on the races before it, "
+               f"then compared with the drivers who finished. {len(scores) // len(model.METHODS)} races.")
+    st.dataframe(model.summary(scores).reset_index(), hide_index=True, column_config={
         "method": "Prediction",
         "spearman": st.column_config.NumberColumn("Rank correlation", format="%.2f", help="1 = predicted order exactly right"),
         "winner": st.column_config.NumberColumn("Winner correct", format="percent"),
         "podium": st.column_config.NumberColumn("Podium drivers correct (of 3)", format="%.2f"),
     })
 
+    st.markdown("**By regulation phase** (rank correlation): rule resets are where past form says least")
+    st.dataframe(model.summary(scores, ["phase"])["spearman"].unstack()[model.METHODS].round(2))
+
     left, right = st.columns(2)
-    hover = alt.selection_point(fields=["round"], on="pointerover", nearest=True, empty=False)
-    base = alt.Chart(scores).encode(
-        x=alt.X("round:O", title="Round"),
+    by_season = model.summary(scores, ["season"]).reset_index()
+    base = alt.Chart(by_season).encode(
+        x=alt.X("season:O", title=None),
         y=alt.Y("spearman:Q", title="Rank correlation", scale=alt.Scale(zero=False)),
         color=alt.Color("method:N", scale=METHOD_COLORS, legend=alt.Legend(orient="top", title=None)))
     lines = base.mark_line(strokeWidth=2) + base.mark_point(size=64, filled=True).encode(
-        tooltip=["race:N", "method:N", alt.Tooltip("spearman:Q", format=".2f")]).add_params(hover)
-    left.markdown("**Accuracy per race**")
+        tooltip=["season:O", "method:N", alt.Tooltip("spearman:Q", format=".2f"),
+                 alt.Tooltip("winner:Q", title="winner correct", format=".0%")])
+    left.markdown("**Accuracy per season**")
     left.altair_chart(lines.properties(height=320), width="stretch")
 
     imp = model.importance(models[True]).assign(label=lambda d: d["feature"].map(features.LABELS))
@@ -143,11 +143,11 @@ with tab_accuracy:
 
 with tab_explore:
     scores, preds = evaluation(today)
-    races = preds[["round", "race_name"]].drop_duplicates().sort_values("round", ascending=False)
-    rnd = st.selectbox("Race", races["round"], format_func=lambda r: f"Round {r} · {races.set_index('round').loc[r, 'race_name']}")
-    sel = preds[preds["round"] == rnd].sort_values("pos")
-    for col, method in zip(st.columns(3), METHODS):
-        s = scores[(scores["round"] == rnd) & (scores["method"] == method)].iloc[0]
+    races = preds[["season", "round", "race_name"]].drop_duplicates().sort_values(["season", "round"], ascending=False)
+    season, rnd, _ = st.selectbox("Race", races.itertuples(index=False), format_func=lambda r: f"{r.season} R{r.round} · {r.race_name}")
+    sel = preds[(preds["season"] == season) & (preds["round"] == rnd)].sort_values("pos")
+    for col, method in zip(st.columns(3), model.METHODS):
+        s = scores[(scores["season"] == season) & (scores["round"] == rnd) & (scores["method"] == method)].iloc[0]
         col.metric(method, f"{s['spearman']:.2f}", help="Rank correlation with the actual finishers")
     st.dataframe(sel.assign(pos=sel["pos"].where(sel["finished"])), hide_index=True,
                  column_order=["pos", "name", "team", "grid", "pred_pre", "pred_grid"], column_config={

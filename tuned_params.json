@@ -1,0 +1,6 @@
+{
+  "num_leaves": 15,
+  "min_data_in_leaf": 20,
+  "learning_rate": 0.03,
+  "rounds": 100
+}
