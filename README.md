@@ -1,6 +1,22 @@
 # my-formula-1
 
-A machine-learning web app that predicts the finishing order of the next Formula 1 race. A LightGBM ranking model learns from every race since 2013 how car pace, driver form, track history and weather turn into a race result. A Streamlit app shows the prediction, the reasons behind it, and how accurate the model has been.
+A machine-learning web app that predicts the finishing order of the **next** Formula 1 race, one race weekend at a time. A LightGBM ranking model learns from every race since 2013 how car pace, driver form, track history and weather turn into a race result. During a race weekend it also uses that weekend's practice times and, once qualifying has run, the starting grid. A Streamlit app shows the prediction, the reasons behind it, and how accurate the model has been. It runs locally in Docker Desktop.
+
+## Contents
+
+- [Why this repo exists](#why-this-repo-exists)
+- [Quick start](#quick-start)
+- [One race weekend at a time](#one-race-weekend-at-a-time)
+- [The app](#the-app)
+- [Architecture](#architecture)
+- [Deployment and security](#deployment-and-security)
+- [Features](#features)
+- [Model](#model)
+- [Evaluation](#evaluation)
+- [Development workflow](#development-workflow)
+- [Configuration](#configuration)
+- [Data sources](#data-sources)
+- [Limitations and ideas](#limitations-and-ideas)
 
 ## Why this repo exists
 
@@ -15,57 +31,75 @@ How much does a good wet-weather record matter compared with a two-place gap to 
 
 ## Quick start
 
-```
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-The first launch downloads every season since 2013 along with practice times and race-day weather, which takes a few minutes. After that, completed seasons load from `.cache/` in seconds. Use **Refresh data** in the sidebar to pull the latest sessions, for example after each practice session or qualifying.
-
-### Run with Docker Desktop
+**With Docker Desktop (recommended):**
 
 ```
 docker compose up -d --build
 ```
 
-Then open http://localhost:8501. Downloaded seasons are kept in the `f1-cache` volume, so restarts and rebuilds don't download them again. To update the app after changing the code, run the same command again.
+Then open http://localhost:8501. To stop it: `docker compose down`. Downloaded data is kept in the `f1-cache` volume, so restarts and rebuilds don't download it again.
 
-### Security
-
-This is a personal tool meant to run on your own computer, not a public service. The setup keeps it that way:
-
-| Measure | Where | Why |
-|---|---|---|
-| Port published on `127.0.0.1` only | [docker-compose.yml](docker-compose.yml) | Only this computer can open the app; other devices on your Wi-Fi or network can't. Streamlit has no login, so don't change this to `8501:8501`. |
-| Runs as a non-root user | [Dockerfile](Dockerfile) | A bug in the app can't act as root inside the container. |
-| Read-only file system | `read_only`, `tmpfs` | Nothing can change the app's code at runtime. Only the data cache and `/tmp` are writable. |
-| No Linux capabilities, no privilege escalation | `cap_drop`, `no-new-privileges` | The container gets none of the extra kernel permissions it doesn't need. |
-| Memory and process limits | `mem_limit`, `pids_limit` | A runaway process can't slow down the rest of your computer. |
-| Pinned package versions | [requirements.txt](requirements.txt) | Rebuilds install the same, known versions instead of whatever is newest. |
-| Viewer-only toolbar; XSRF and CORS checks on | `CMD` in [Dockerfile](Dockerfile) | Hides Streamlit's developer menu and blocks requests from other websites. |
-
-The app makes only outgoing HTTPS requests to Jolpica, OpenF1 and Open-Meteo, and takes no user input beyond the sidebar controls. Cached responses are stored as plain JSON, never pickled, so a tampered cache file can't run code. Streamlit's startup log prints an "External URL" that is only informational. The app is not reachable on it.
-
-## One race at a time
-
-The app predicts only the **next race**, from what is known at that moment:
-
-1. **Before the weekend**: history only. This means earlier seasons plus this season's races so far (car pace and trend, driver form, gap to teammate, track record, weather forecast).
-2. **After each practice session**: also each driver's practice pace (best lap compared with the session's fastest lap).
-3. **After qualifying**: also the starting grid. The app switches to the model trained with grid positions.
-
-The page header shows which stage the prediction is at. The **Model accuracy** tab replays past races the same way: each race is predicted by a model trained only on the races before it. It never predicts a season in one go.
+**Without Docker (Python 3.13):**
 
 ```
-python test_model.py   # offline checks: no data leakage, and the model learns a known order
-python tune.py         # re-tune model settings (a few minutes); writes tuned_params.json
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+The first launch downloads every season since 2013 along with practice times and race-day weather, which takes a few minutes. After that, completed seasons load from the cache in seconds. During a race weekend, press **Refresh data** in the sidebar after each practice session and after qualifying to update the prediction.
+
+## One race weekend at a time
+
+The app never predicts a whole season. It predicts only the **next race**, using only what is known at that moment, and the prediction gets sharper as the weekend goes on:
+
+```mermaid
+flowchart LR
+    H[("History<br/>all earlier races,<br/>this season so far")] --> S0
+    S0["Before the weekend<br/>history + weather forecast"] -->|FP1, FP2, FP3 run| S1
+    S1["After practice<br/>+ practice pace"] -->|qualifying runs| S2
+    S2["After qualifying<br/>+ starting grid<br/>(switches to the grid model)"] -->|Sunday| R[Race]
+    R -->|result is added| H
+    S0 -.-> M1[[Model before qualifying]]
+    S1 -.-> M1
+    S2 -.-> M2[[Model with grid]]
+```
+
+| Stage | What the prediction uses | Model |
+|---|---|---|
+| **Before the weekend** | Earlier seasons plus this season's races so far: car pace and trend, driver form, gap to teammate, track record, weather forecast | Before qualifying |
+| **After each practice session** | All of the above, plus each driver's practice pace (best lap compared with the session's fastest lap) | Before qualifying |
+| **After qualifying** | All of the above, plus the starting grid | With grid |
+
+The page header shows which stage the prediction is at, for example *"2 practice sessions used, qualifying not run yet"*. After the race, its result joins the history, and the next race weekend starts from there.
+
+This is what happens each time you open the page or press **Refresh data**:
+
+```mermaid
+sequenceDiagram
+    actor You
+    participant App as app.py (Streamlit)
+    participant Data as data.py
+    participant APIs as Jolpica / OpenF1 / Open-Meteo
+    participant Feat as features.py
+    participant Model as model.py
+    You->>App: open http://localhost:8501
+    App->>Data: load_history(today)
+    Data->>APIs: past results, practice, weather (cached after first run)
+    App->>Feat: build(rows), replay every race in date order
+    App->>Model: train(df) both models, cached
+    App->>Data: next_race(today)
+    Data->>APIs: next race, qualifying, practice, forecast (always fresh)
+    App->>Feat: upcoming(history, entries, circuit, wet)
+    App->>Model: rank(model, features)
+    Model-->>App: predicted order + SHAP contributions
+    App-->>You: top 3, table, "why" chart, weekend stage
 ```
 
 ## The app
 
 | Tab | What it shows |
 |---|---|
-| **Next race** | Predicted finishing order, the top 3 as headline cards, key inputs per driver (car pace, car trend, gap to teammate, track record), and a chart of how much each factor group pushed each driver up or down. Practice times are used as soon as any practice session has run. Before qualifying it uses the pre-qualifying model; once the grid is published, it switches to the model that also uses grid positions. |
+| **Next race** | Predicted finishing order, the top 3 as headline cards, key inputs per driver (grid, practice gap, car pace, car trend, gap to teammate, track record), and a chart of how much each factor group pushed each driver up or down. |
 | **Model accuracy** | How each prediction method did on the held-out seasons (2024 onward): rank correlation, winner correct, podium drivers correct. Also accuracy by regulation phase, accuracy per season, and which features the model relies on. |
 | **Race explorer** | Pick any held-out race to compare the predictions with the actual result. |
 
@@ -75,30 +109,31 @@ The sidebar lets you override the weather (forecast / dry / wet) to see how the 
 
 ```mermaid
 flowchart LR
-    subgraph Sources
+    subgraph Sources["External sources (HTTPS, no API keys)"]
         J[Jolpica F1 API<br/>results, schedule, qualifying]
         O[OpenF1<br/>practice session times]
         W[Open-Meteo<br/>hourly rain archive and forecast]
     end
-    subgraph data.py
-        G[get<br/>HTTP, retry, disk cache] --> R[flat result rows<br/>one per driver per race]
+    subgraph D["data.py"]
+        G[get<br/>HTTP, retry, JSON disk cache] --> R[flat result rows<br/>one per driver per race]
     end
-    subgraph features.py
-        H[History<br/>replays races in order] --> F[feature rows<br/>built only from earlier races]
+    subgraph F["features.py"]
+        H[History<br/>replays races in order] --> FR[feature rows<br/>built only from earlier races]
     end
-    subgraph model.py
+    subgraph M["model.py"]
         T[train<br/>LightGBM lambdarank] --> P[rank<br/>order + SHAP contributions]
         B[backtest<br/>walk-forward, race by race]
     end
     J --> G
     O --> G
     W --> G
+    G <--> C[(".cache/<br/>JSON files")]
     R --> H
-    F --> T
-    F --> B
+    FR --> T
+    FR --> B
     B --> TU[tune.py<br/>grid search on 2017–2023]
-    TU --> J2[(tuned_params.json)]
-    J2 --> T
+    TU --> TP[(tuned_params.json)]
+    TP --> T
     P --> A[app.py<br/>Streamlit UI]
     B --> A
 ```
@@ -110,7 +145,40 @@ flowchart LR
 | [model.py](model.py) | Trains the ranking model, ranks a field with per-feature SHAP contributions, reports feature importance, and runs the walk-forward backtest over any set of seasons. Loads tuned settings from `tuned_params.json`. |
 | [tune.py](tune.py) | Grid search over model settings, scored by walk-forward validation on the tuning seasons, followed by one report on the held-out seasons, with and without the regulation features. Runs in parallel across CPU cores. |
 | [app.py](app.py) | The Streamlit interface. Caches the downloads, the trained models and the backtest. |
-| [test_model.py](test_model.py) | Synthetic-data checks: changing a race's result never changes its own features, and the model learns an obvious car and driver order. |
+| [test_model.py](test_model.py) | Offline checks: changing a race's result never changes its own features, the model learns an obvious car and driver order, and practice gaps are parsed correctly. |
+| [Dockerfile](Dockerfile), [docker-compose.yml](docker-compose.yml) | The container image and how Docker Desktop runs it, including the security settings below. |
+
+## Deployment and security
+
+This is a personal tool for your own computer, not a public service. Docker Desktop runs it, and the setup keeps it private:
+
+```mermaid
+flowchart LR
+    subgraph PC["Your computer (Windows, Docker Desktop)"]
+        BR[Browser] -->|"http://localhost:8501"| PORT["127.0.0.1:8501<br/>only this computer"]
+        subgraph CT["Container: non-root user, read-only file system,<br/>no Linux capabilities, 2 GB memory / 256 process limits"]
+            ST[Streamlit app<br/>port 8501]
+            TMP["/tmp<br/>in memory"]
+        end
+        PORT --> ST
+        ST <--> VOL[("f1-cache volume<br/>/app/.cache")]
+    end
+    LAN[Other devices on<br/>your network] -.-x|blocked| PORT
+    ST -->|outgoing HTTPS only| API[Jolpica, OpenF1,<br/>Open-Meteo]
+```
+
+| Measure | Where | Why |
+|---|---|---|
+| Port published on `127.0.0.1` only | [docker-compose.yml](docker-compose.yml) | Only this computer can open the app; other devices on your Wi-Fi or network can't. Streamlit has no login, so don't change this to `8501:8501`. |
+| Runs as a non-root user | [Dockerfile](Dockerfile) | A bug in the app can't act as root inside the container. |
+| Read-only file system | `read_only`, `tmpfs` | Nothing can change the app's code at runtime. Only the data cache and `/tmp` are writable. |
+| No Linux capabilities, no privilege escalation | `cap_drop`, `no-new-privileges` | The container gets none of the extra kernel permissions it doesn't need. |
+| Memory and process limits | `mem_limit`, `pids_limit` | A runaway process can't slow down the rest of your computer. |
+| Pinned package versions | [requirements.txt](requirements.txt) | Rebuilds install the same, known versions instead of whatever is newest. |
+| Viewer-only toolbar; XSRF and CORS checks on | `CMD` in [Dockerfile](Dockerfile) | Hides Streamlit's developer menu and blocks requests from other websites. |
+| Health check | `HEALTHCHECK` in [Dockerfile](Dockerfile) | Docker Desktop shows the container as *healthy* once Streamlit answers. |
+
+The app makes only outgoing HTTPS requests to Jolpica, OpenF1 and Open-Meteo, and takes no user input beyond the sidebar controls. Cached responses are stored as plain JSON, never pickled, so a tampered cache file can't run code. Streamlit's startup log prints an "External URL" that is only informational. The app is not reachable on it.
 
 ## Features
 
@@ -140,23 +208,40 @@ Each driver in each race is described by 17 features in the three categories, pl
 
 Car history follows a team through rebrands: Force India → Racing Point → Aston Martin, Toro Rosso → AlphaTauri → RB, Sauber → Alfa Romeo → Sauber → Audi, Lotus → Renault → Alpine, and Marussia → Manor. The mapping is `LINEAGE` in [features.py](features.py).
 
-Missing values (rookies, first visits to a track, `car_level` before a season's first race) are left empty. LightGBM handles them natively rather than having them filled with guesses.
+Missing values (rookies, first visits to a track, `car_level` before a season's first race, practice before FP1) are left empty. LightGBM handles them natively rather than having them filled with guesses.
 
 ## Model
 
 - **Learning to rank, not regression.** The model uses LightGBM's `lambdarank` objective with each race as a query group. It learns to *order* the drivers within a race, which is the actual question, rather than predicting a finishing position for each driver independently. Higher places get more weight, so mistakes at the front cost more than mistakes in the midfield.
 - **Two models.** One is trained without `grid` for predictions before qualifying, the other with `grid` for after qualifying. The app picks the right one automatically.
 - **Trained on finishers.** Retirements are mostly bad luck, so the model learns the order of drivers who finished. Reliability still enters through the retirement-rate features.
-- **Monotone constraints.** A worse car pace, driver form or grid slot can never improve a driver's predicted position. This keeps the model sensible on a small dataset.
+- **Monotone constraints.** A worse car pace, driver form, practice gap or grid slot can never improve a driver's predicted position. This keeps the model sensible on a small dataset.
 - **Tuned, not guessed.** `tune.py` picked 15 leaves per tree, at least 20 rows per leaf, a learning rate of 0.03 and 100 rounds. All of the top ten configurations scored within 0.005 of each other, so the model is not sensitive to these settings.
-- **Explainable.** The app calculates each prediction's SHAP contributions with LightGBM's built-in `pred_contrib`, then sums them into the Car / Driver / Track & conditions / Qualifying groups.
+- **Explainable.** The app calculates each prediction's SHAP contributions with LightGBM's built-in `pred_contrib`, then sums them into the Car / Driver / Track & conditions / This weekend groups.
 
 ## Evaluation
 
 ### Why not k-fold cross-validation
 Standard k-fold shuffles races into random folds, so the model would train on later races and be tested on earlier ones. In F1 that leaks the future: a model that has seen October knows which cars got faster, which makes March look easy. The scores would come out too optimistic. Instead, every evaluation here is **walk-forward**: each race is predicted by a model trained only on the races before it, just like a real prediction.
 
+```mermaid
+flowchart LR
+    subgraph R1["Predict race n"]
+        A1["train on races 1 … n−1"] --> P1["predict race n"] --> S1["score vs actual result"]
+    end
+    subgraph R2["Predict race n+1"]
+        A2["train on races 1 … n"] --> P2["predict race n+1"] --> S2["score vs actual result"]
+    end
+    R1 -->|"race n result added"| R2 -->|"… every race in the scored seasons"| AVG["average the scores"]
+```
+
 ### Tuning set and held-out set
+
+```mermaid
+flowchart LR
+    T0["2013–2016<br/>history only,<br/>never scored"] --> T1["2017–2023<br/>tuning seasons<br/>tune.py picks settings"] --> T2["2024–2026<br/>held-out seasons<br/>reported once"]
+```
+
 | Seasons | Used for |
 |---|---|
 | 2013–2016 | Training history only. They are never scored. |
@@ -199,19 +284,40 @@ What this shows:
 
 The regulation features help a little where you'd expect, in the first races after the 2017 and 2022 resets, and are neutral elsewhere. On the 2026 reset (only 5 races) they didn't help. The honest reason is that the data contains just three earlier resets (2014, 2017, 2022) to learn from, so "how well does a team adapt to new rules" rests on one to three examples per team.
 
+## Development workflow
+
+```mermaid
+flowchart TD
+    E[Change code<br/>features, model, app] --> T["python test_model.py<br/>offline checks, seconds"]
+    T -->|fails| E
+    T -->|ok| Q{Changed features<br/>or model settings?}
+    Q -->|yes| TU["python tune.py<br/>re-tune and held-out report, minutes"]
+    TU --> RD[Update README numbers]
+    Q -->|no| DK
+    RD --> DK["docker compose up -d --build<br/>check http://localhost:8501"]
+    DK --> C[git commit and push]
+```
+
+```
+python test_model.py   # offline checks: no data leakage, the model learns a known order, practice parsing
+python tune.py         # re-tune model settings (a few minutes); writes tuned_params.json
+```
+
+After changing features, run `python tune.py` and compare its held-out report with the numbers above. Don't adjust things based on the held-out results too often, or they stop being held out.
+
 ## Configuration
 
 | Setting | Where | Default |
 |---|---|---|
 | First season loaded | `FIRST_SEASON` in [data.py](data.py) | 2013 |
+| First season with practice data | `OPENF1_FROM` in [data.py](data.py) | 2023 |
 | Tuning and held-out seasons | `TUNE_SEASONS`, `TEST_FROM` in [model.py](model.py) | 2017–2023, 2024+ |
 | Settings search grid | `GRID` in [tune.py](tune.py) | 36 combinations |
 | Model settings | `CONFIG` in [model.py](model.py), overridden by `tuned_params.json` | see above |
 | Regulation reset seasons, team renames | `REG_CHANGES`, `LINEAGE` in [features.py](features.py) | – |
 | Wet-race threshold | `WET_MM` in [data.py](data.py) | 0.5 mm |
 | Feature definitions | `History.features` in [features.py](features.py) | – |
-
-After changing features, run `python tune.py` and compare its held-out report with the numbers above. Don't adjust things based on the held-out results too often, or they stop being held out.
+| Port, memory and process limits | [docker-compose.yml](docker-compose.yml) | `127.0.0.1:8501`, 2 GB, 256 |
 
 ## Data sources
 
@@ -219,13 +325,14 @@ After changing features, run `python tune.py` and compare its held-out report wi
 - [OpenF1](https://openf1.org): free practice classifications (best lap per driver per session) from 2023 on. One request per season. No API key is needed.
 - [Open-Meteo](https://open-meteo.com): hourly rain from the historical archive and the 16-day forecast. No API key is needed.
 
-Responses that won't change (finished seasons, older weather) are cached in `.cache/`, which git ignores.
+Responses that won't change (finished seasons, older weather) are cached in `.cache/` (the `f1-cache` volume in Docker), which git ignores. The current season is always downloaded fresh.
 
 ## Limitations and ideas
 
-- **Not modelled yet:** tuning for winner accuracy specifically, win and podium probabilities (e.g. by simulating many races from the model's scores), sprint races, practice long-run pace, grid penalties, tyre strategy and safety-car likelihood.
+- **Not modelled yet:** sprint race results, tuning for winner accuracy specifically, win and podium probabilities (e.g. by simulating many races from the model's scores), practice long-run pace, grid penalties, tyre strategy and safety-car likelihood.
 - New rule resets and team renames must be added by hand to `REG_CHANGES` and `LINEAGE`.
 - Only three past resets exist to learn from, so the model can't reliably predict which team will nail a new set of rules.
 - Wet races are rare, so the model has little to learn from about rain.
 - Races more than 16 days away have no forecast and are treated as dry unless you switch to **Wet** in the sidebar.
 - Before qualifying, the field is assumed to be the line-up from the last race.
+- Practice pace comes from single fastest laps, so a team that hides its pace in practice can look slower than it is.
